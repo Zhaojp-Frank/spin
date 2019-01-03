@@ -83,7 +83,7 @@ struct cache_lru {
 struct gpu_mappings {
 	unsigned int pid;
 	unsigned int tgida;
-	int line;
+	int line; //??
 	void* gpu_addr;
 	void* key;
 	void* virt_addr;
@@ -505,6 +505,7 @@ static struct mmu_notifier notify = {
 	.ops = &no_ops,
 };
 
+//return gpu.actual addr underneath its vAddr
 static void* translate_virt(void* addr_virt, struct mm_struct *mm,
 	unsigned long * length, void** virt_start)
 {
@@ -523,13 +524,15 @@ static void* translate_virt(void* addr_virt, struct mm_struct *mm,
 		*length = (vma->vm_end - vma->vm_start);
 		*virt_start = (void*) vma->vm_start;
 
-		return(void*) (pfn << PAGE_SHIFT);
+		return(void*) (pfn << PAGE_SHIFT); // here
 
 	} else {
 		return NULL;
 	}
 }
 
+//dec page.ref from f.pagecache if page is already in mem
+// return % of page-cache hit
 static int get_mypc(struct fd f, size_t count, off_t offset, int* ubuffer)
 {
 	int curr_page, my_num_pages, vpages;
@@ -545,7 +548,7 @@ static int get_mypc(struct fd f, size_t count, off_t offset, int* ubuffer)
 		if (mypage) {
 			ubuffer[curr_page] = 1;
 			vpages++;
-			put_page(mypage);
+			put_page(mypage); //frank dec page.refCnt
 		}
 		curr_page++;
 	}
@@ -572,6 +575,7 @@ static void * add_gpu_mapping(void* addr_virt, void* addr_phys,
 		gpu_mapping2 = list_entry(pos2, struct gpu_mappings, list);
 		if ((u64) (gpu_mapping2->gpu_addr) <= (u64) (addr_phys) &&
 			(u64) (addr_phys) < (u64) ((u64) (gpu_mapping2->gpu_addr) + (u64) (length))) {
+			// has overlap
 			tgpu_addr = gpu_mapping2->gpu_addr;
 			tvirt_addr = gpu_mapping2->virt_addr;
 			tkey = gpu_mapping2->key;
@@ -606,7 +610,7 @@ static void * add_gpu_mapping(void* addr_virt, void* addr_phys,
 	if (addr_phys == NULL || addr_virt == NULL) {
 		return NULL;
 	}
-
+	// insert new 
 	gpu_mapping = (struct gpu_mappings *) kmalloc(sizeof(struct gpu_mappings), GFP_KERNEL);
 
 	gpu_mapping->length = length;
@@ -621,7 +625,7 @@ static void * add_gpu_mapping(void* addr_virt, void* addr_phys,
 	} else {
 		gpu_mapping->gpu_addr = addr_phys;
 		gpu_mapping->virt_addr = addr_virt;
-		get_random_bytes(&(gpu_mapping->key), sizeof(gpu_mapping->key));
+		get_random_bytes(&(gpu_mapping->key), sizeof(gpu_mapping->key)); //generate rand# for new entry , or re-use existing entry
 	}
 
 	INIT_LIST_HEAD(&gpu_mapping->list);
@@ -659,11 +663,11 @@ static ssize_t ring_read(struct fd f, void* dest, size_t sizeBytes, off_t offset
 
 		readSize = DIV_ROUND_UP(readSizeBytes + destOffset, 4096);
 
-		for (j = 0; j < readSize; ++j) {
+		for (j = 0; j < readSize; ++j) { //frank!!! ... somehow insert key into m_pdBuffer. [startOffset, key][]
 			*((unsigned long long*) (void*) (unsigned long)
 				(((unsigned long) m_pDBuffer) + (((unsigned long) j)
 				* (unsigned long) 4096) +(unsigned long) 8 * line * 2)) =
-				destPage + j * 4096;
+				destPage + j * 4096; 
 
 			*((unsigned long long*) (void*) (unsigned long)
 				((((unsigned long) m_pDBuffer) + (((unsigned long) j)
@@ -713,7 +717,7 @@ static ssize_t prep_ring_read(struct fd f, void *buf, size_t count, off_t offset
 		return ret;
 
 	} else {
-		while (1) {
+		while (1) { // for each range, do P2P or page_cache??
 			while (j < ubuffer_size) {
 				if (*(ubuffer + j) == 1) {
 					cons++;
@@ -892,14 +896,14 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 			do {
 				ubuffer_size = DIV_ROUND_UP(local_param.readArgs.count + (local_param.readArgs.offset % 4096), 4096);
 				ubuffer = (int *) kzalloc(ubuffer_size * sizeof(int), GFP_KERNEL);
-				perinPC = get_mypc(f, local_param.readArgs.count, local_param.readArgs.offset, ubuffer);
+				perinPC = get_mypc(f, local_param.readArgs.count, local_param.readArgs.offset, ubuffer); // page-cache hit %
 
 				if ((unsigned long) (f.file->private_data) == 0) {
 					if (f.file->f_inode != NULL) {
 						if (f.file->f_inode->i_sb != NULL) {
 							if (f.file->f_inode->i_sb->s_bdev != NULL) {
 								if (check_device(MAJOR(f.file->f_inode->i_sb->s_bdev->bd_dev))) { /*|| MAJOR(f.file->f_inode->i_sb->s_bdev->bd_dev) == 252*/
-									struct files_fd * new_fd;
+									struct files_fd * new_fd; //double check dev
 									struct fd_priv * temp;
 
 									spin_lock(&fd_listlock);
@@ -910,19 +914,19 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 									temp->last_offset = 512 * 4096;
 									temp->current_l = NULL;
 									temp->myfile = *(f.file);
-									temp->myfile.f_flags |= O_DIRECT;
+									temp->myfile.f_flags |= O_DIRECT; //frank add flag
 									INIT_RADIX_TREE(&(temp->mypc_tree), GFP_KERNEL);
 
-									if (!disable_ra_pc) {
+									if (!disable_ra_pc) { // frank: read ahead, keep orign ops
 										orig_ops = *(f.file->f_inode->i_fop);
 										orig_ops_ptr = (f.file->f_inode->i_fop);
 										orig_read = orig_ops.read;
-										orig_ops.read = cusread;
+										orig_ops.read = cusread; //replace with curr read
 										f.file->f_inode->i_fop = &orig_ops;
 									}
 
 									new_fd = (struct files_fd *) kzalloc(sizeof(struct files_fd), GFP_KERNEL);
-									new_fd->mdata = (void*) temp;
+									new_fd->mdata = (void*) temp; //
 									new_fd->tgid = current->tgid;
 									new_fd->fd = local_param.readArgs.fd;
 
@@ -942,7 +946,7 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 					}
 				}
 
-				if ((unsigned long) (f.file->private_data) == 1) {
+				if ((unsigned long) (f.file->private_data) == 1) { //call vfs_read and return rst
 					local_param.readArgs.read_return = my_read(f, local_param.readArgs.buf,
 						local_param.readArgs.count,
 						local_param.readArgs.offset, 0);
@@ -957,10 +961,10 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 
 			key_return = get_key(local_param.readArgs.buf, current->pid, &(offset_return), &(line));
 
-			if (key_return) {
+			if (key_return) { //
 				spin_unlock(&checklock);
 
-				if (only_p2p) {
+				if (only_p2p) { //global flag
 					local_param.readArgs.read_return = prep_ring_read(f, local_param.readArgs.buf, local_param.readArgs.count, local_param.readArgs.offset,
 						key_return, line, ubuffer_size, ubuffer, offset_return, local_param.readArgs.m_pDBuffer);
 				} else {
@@ -1015,6 +1019,8 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 				return 1;
 			}
 
+			// key doesn't exist. get readDst's backing gpuAddr
+			// is it able to disguish gpu or CPU??
 			gpu_addr_phys = translate_virt(local_param.readArgs.buf, current->mm, &(gpu_length), &virt_start);
 
 			if (!gpu_addr_phys) {
@@ -1029,7 +1035,7 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 				kfree(ubuffer);
 				return 2;
 			}
-
+			// it's GPU, 
 			key_return = add_gpu_mapping(virt_start, gpu_addr_phys, gpu_length, &(line));
 			spin_unlock(&checklock);
 
@@ -1038,6 +1044,7 @@ static long spindrv_ioctl(struct file *file, unsigned int ioctl_num, unsigned lo
 				local_param.readArgs.read_return = prep_ring_read(f, local_param.readArgs.buf, local_param.readArgs.count, local_param.readArgs.offset,
 					key_return, line, ubuffer_size, ubuffer, offset_return, local_param.readArgs.m_pDBuffer);
 			} else {
+				// mixing page_cache read-ahead and P2P...
 				if (local_param.readArgs.count < RAV && local_param.readArgs.offset <= ((struct fd_priv *) (f.file->private_data))->last_offset &&
 					((struct fd_priv *) (f.file->private_data))->last_offset <= local_param.readArgs.offset + local_param.readArgs.count) {
 					local_param.readArgs.read_return = my_read(f, (void*) local_param.readArgs.buf,

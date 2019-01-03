@@ -6,7 +6,6 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <linux/unistd.h>
-#include <spin/spindrv.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -15,6 +14,7 @@
 #include <sys/syscall.h>
 #include <dlfcn.h>
 
+#include "../spindrv/include/spindrv.h"
 #define RING_SIZE 12*1024*1024
 #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
